@@ -910,6 +910,32 @@ public class MainActivity extends AppCompatActivity {
         return out;
     }
 
+    /** 일반 YouTube 영상 검색(기존 doSearch 와 동일한 요청) — 카탈로그 곡을 영상 ID 로 연결할 때만 사용 */
+    private JSONArray ytVideoSearch(String query) throws Exception {
+        JSONObject client = new JSONObject();
+        client.put("clientName", "WEB");
+        client.put("clientVersion", "2.20240101.00.00");
+        client.put("hl", "ko"); client.put("gl", "KR");
+        JSONObject body = new JSONObject();
+        body.put("context", new JSONObject().put("client", client));
+        body.put("query", query);
+        body.put("params", "EgIQAQ==");
+        Request req = new Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false")
+                .post(RequestBody.create(body.toString(), MediaType.parse("application/json; charset=utf-8")))
+                .addHeader("X-YouTube-Client-Name", "1")
+                .addHeader("X-YouTube-Client-Version", "2.20240101.00.00")
+                .addHeader("Origin", "https://www.youtube.com")
+                .addHeader("Referer", "https://www.youtube.com/")
+                .addHeader("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.8")
+                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
+                .build();
+        try (Response resp = http.newCall(req).execute()) {
+            if (!resp.isSuccessful() || resp.body() == null) throw new IOException("HTTP " + resp.code());
+            return parseSearchResults(readUtf8(resp));
+        }
+    }
+
     private void doMusicSearch(JSONObject msg) {
         String id = msg.optString("id", "0");
         try {
@@ -918,30 +944,43 @@ public class MainActivity extends AppCompatActivity {
             // 곡 검색: 무료 카탈로그(iTunes/Deezer) 조회를 YTM 요청과 동시에 시작
             java.util.concurrent.Future<java.util.List<CatalogSearch.Hit>> cat =
                     kind.equals("song") ? CatalogSearch.start(http, query) : null;
-            JSONArray out = ytmSearchItems(query, kind, kind.equals("song") ? 30 : 20);
-            if (cat != null) {
+            JSONArray out;
+            if (cat == null) out = ytmSearchItems(query, kind, 20);
+            else {
+                JSONArray ytm = new JSONArray();
+                try { ytm = ytmSearchItems(query, kind, 30); } catch (Exception ignored) {}
                 java.util.List<CatalogSearch.Hit> hits;
-                try { hits = cat.get(2500, java.util.concurrent.TimeUnit.MILLISECONDS); }
+                try { hits = cat.get(3000, java.util.concurrent.TimeUnit.MILLISECONDS); }
                 catch (Exception e) { hits = new java.util.ArrayList<>(); }
-                JSONArray ranked = CatalogSearch.rank(out, hits, 20);
-                // 카탈로그 1순위 곡이 YTM 결과에 없으면 해당 곡을 직접 찾아 맨 앞에 추가
-                if (!hits.isEmpty() && !CatalogSearch.hasMatch(ranked, hits.get(0))) {
-                    CatalogSearch.Hit h = hits.get(0);
+                out = CatalogSearch.rank(ytm, hits, 20);
+                // 카탈로그(iTunes/Deezer)에 등록된 곡 중 아직 없는 것은 YouTube 에서 같은 곡 영상을 찾아 채운다 (병렬)
+                if (out.length() < 12 && !hits.isEmpty()) {
+                    java.util.ArrayList<java.util.concurrent.Future<JSONObject>> fs = new java.util.ArrayList<>();
+                    int n = 0;
+                    for (final CatalogSearch.Hit h : hits) {
+                        if (n >= 12) break;
+                        if (CatalogSearch.hasMatch(out, h)) continue;
+                        n++;
+                        fs.add(CatalogSearch.submit(() -> CatalogSearch.pick(ytVideoSearch(h.artist + " " + h.title), h)));
+                    }
+                    java.util.HashSet<String> ids = new java.util.HashSet<>();
+                    for (int i = 0; i < out.length(); i++) ids.add(out.getJSONObject(i).optString("id"));
+                    long dl = System.currentTimeMillis() + 4500;
+                    for (java.util.concurrent.Future<JSONObject> f : fs) {
+                        if (out.length() >= 20) break;
+                        try {
+                            JSONObject t = f.get(Math.max(200, dl - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
+                            if (t != null && ids.add(t.optString("id"))) out.put(t);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                // 최후의 보루: 아무것도 못 찾았으면 일반 영상 검색 결과라도 보여준다
+                if (out.length() == 0) {
                     try {
-                        JSONArray r = ytmSearchItems(h.title + " " + h.artist, "song", 6);
-                        for (int i = 0; i < r.length(); i++) {
-                            JSONObject c = r.getJSONObject(i);
-                            if (c.optString("albumId").isEmpty()
-                                    || !CatalogSearch.matches(c.optString("title"), c.optString("channel"), h)) continue;
-                            JSONArray m = new JSONArray(); m.put(c);
-                            for (int k = 0; k < ranked.length() && m.length() < 20; k++)
-                                if (!ranked.getJSONObject(k).optString("id").equals(c.optString("id"))) m.put(ranked.get(k));
-                            ranked = m;
-                            break;
-                        }
+                        JSONArray v = ytVideoSearch(query);
+                        for (int i = 0; i < v.length() && out.length() < 15; i++) out.put(v.getJSONObject(i));
                     } catch (Exception ignored) {}
                 }
-                out = ranked;
             }
             JSONObject res = new JSONObject();
             res.put("items", out);
