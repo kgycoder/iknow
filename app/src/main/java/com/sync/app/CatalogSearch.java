@@ -158,12 +158,18 @@ final class CatalogSearch {
         final double[] sc = new double[n];
         List<JSONObject> keep = new ArrayList<>();
         HashSet<String> seen = new HashSet<>();
+        // 앨범 정보가 있는 곡이 하나라도 있을 때만 미등록 항목을 걸러낸다(파싱 실패로 결과가 전부 사라지는 것 방지)
+        boolean anyReg = false;
+        for (int i = 0; i < n && !anyReg; i++) {
+            JSONObject o = ytm.optJSONObject(i);
+            if (o != null && !o.optString("albumId").isEmpty()) anyReg = true;
+        }
         for (int i = 0; i < n; i++) {
             JSONObject o = ytm.optJSONObject(i);
             if (o == null) continue;
             int hi = hitIndex(o, hits);
             boolean reg = !o.optString("albumId").isEmpty();
-            if (!reg && hi < 0) continue;
+            if (anyReg && !reg && hi < 0) continue;
             if (!seen.add(norm(o.optString("title")) + "|" + norm(o.optString("channel")))) continue;
             double s = 1.0 - i * 0.03;
             if (hi >= 0 && hi < 100) s += 2.0 + 1.0 / (1 + hi);
