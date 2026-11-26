@@ -638,7 +638,13 @@ public class MainActivity extends AppCompatActivity {
     /* ════════ YouTube Music — 곡/아티스트/앨범 메타데이터, 상세 페이지, 연관곡(라디오) ════════
        응답은 searchResult 타입(같은 id)으로 돌려보내 JS 브릿지(__sync/callCs)를 그대로 쓴다.
        구조 파싱은 경로 고정 대신 렌더러 키를 재귀 탐색해 응답 구조 변경에 강하게 만들었다. */
-    private static final String YTM_VER = "1.20241127.01.00";
+    /** WEB_REMIX 클라이언트 버전은 "1.<오늘 날짜(UTC)>.01.00" 형식 — ytmusicapi 와 동일. 오래된 고정 버전은 YouTube Music 이 응답을 축소/거부해
+     *  곡 검색이 비거나 browse 가 400 을 반환하는 원인이 된다. */
+    private static String ytmVer() {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return "1." + f.format(new java.util.Date()) + ".01.00";
+    }
     private static final Pattern YTM_DUR = Pattern.compile("^\\d{1,2}:\\d{2}(:\\d{2})?$");
     private static final Pattern YTM_YEAR = Pattern.compile("^(19|20)\\d{2}$");
     private static final Pattern YTM_TYPE = Pattern.compile(
@@ -656,7 +662,7 @@ public class MainActivity extends AppCompatActivity {
     private String ytmCallOnce(String ep, JSONObject body) throws Exception {
         JSONObject client = new JSONObject();
         client.put("clientName", "WEB_REMIX");
-        client.put("clientVersion", YTM_VER);
+        client.put("clientVersion", ytmVer());
         client.put("hl", "ko");
         client.put("gl", "KR");
         body.put("context", new JSONObject().put("client", client));
@@ -665,7 +671,7 @@ public class MainActivity extends AppCompatActivity {
                 .post(RequestBody.create(body.toString(),
                         MediaType.parse("application/json; charset=utf-8")))
                 .addHeader("X-YouTube-Client-Name", "67")
-                .addHeader("X-YouTube-Client-Version", YTM_VER)
+                .addHeader("X-YouTube-Client-Version", ytmVer())
                 .addHeader("Origin", "https://music.youtube.com")
                 .addHeader("Referer", "https://music.youtube.com/")
                 .addHeader("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.8")
@@ -1002,7 +1008,7 @@ public class MainActivity extends AppCompatActivity {
                     try {
                         JSONObject t = fs.get(i).get(Math.max(200, dl - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
                         if (t == null || !ids.add(t.optString("id"))) continue;
-                        (CatalogSearch.exact(need.get(i), query) ? front : back).add(t);
+                        back.add(t);
                     } catch (Exception ignored) {}
                 }
                 JSONArray merged = new JSONArray();
