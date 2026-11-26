@@ -1291,12 +1291,13 @@ function cachedCall(p, ttl = 900000) {
 async function songSearch(q) {
     try {
         const r = await cachedCall({ type: 'musicSearch', kind: 'song', query: q });
-        if (r.items?.length) return r.items;
+        return r.items || [];
     } catch { }
     const r = await cachedCall({ type: 'search', query: q });
     return rankMusicResults(r.tracks || []);
 }
 const _spin = '<div class="state"><div class="spinner"></div></div>';
+const _miOk = id => /^(MPREb_|UC)/.test(id || '');   // 유효한 앨범/아티스트 browseId 만 허용 (잘못된 ID → HTTP 400 방지)
 const _artSz = (u, n) => u ? u.replace(/=w\d+-h\d+/, `=w${n}-h${n}`) : '';
 
 /* ── 취향 프로필: 아티스트별 점수(재생 +1, 끝까지 들음 +1.5, 초반 스킵 -1, 지수 감쇠) ── */
@@ -1463,18 +1464,16 @@ async function doSearch(query) {
     _sStack.length = 0; _sRender = null; _miMode(false);
     /* 영상 검색(기존 그대로: 쿼리에 키워드를 덧붙이지 않음)과 곡/아티스트/앨범 검색을 동시에 요청 */
     const mq = kind => cachedCall({ type: 'musicSearch', kind, query: q }, 300000);
-    const [vr, sr, ar, br] = await Promise.allSettled([
-        cachedCall({ type: 'search', query: q }, 300000), mq('song'), mq('artist'), mq('album')]);
+    const [sr, ar, br] = await Promise.allSettled([mq('song'), mq('artist'), mq('album')]);
     const songs = sr.status === 'fulfilled' ? (sr.value.items || []) : [];
-    const sid = new Set(songs.map(t => t.id));
     const d = {
         songs,
         artists: ar.status === 'fulfilled' ? (ar.value.items || []) : [],
         albums: br.status === 'fulfilled' ? (br.value.items || []) : [],
-        videos: vr.status === 'fulfilled' ? sortMusicFirst(vr.value.tracks || []).filter(t => !sid.has(t.id)) : []
+        videos: []   // 앨범/싱글/EP 에 등록된 음원만 표시 (일반 영상 검색 결과 제외)
     };
     if (!d.songs.length && !d.artists.length && !d.albums.length && !d.videos.length) {
-        const err = vr.status === 'rejected' ? vr.reason?.message : '';
+        const err = sr.status === 'rejected' ? sr.reason?.message : '';
         area.innerHTML = err ? `<div class="state"><h3>검색 실패</h3><p>${esc(err)}</p></div>`
             : `<div class="state"><h3>결과 없음</h3><p>다른 검색어를 시도해보세요</p></div>`;
         return;
@@ -1489,11 +1488,12 @@ async function _miFallback(kind, id, hint) {
     const q = [hint.name, kind === 'album' ? hint.artist : ''].filter(Boolean).join(' ');
     const r = await cachedCall({ type: 'musicSearch', kind, query: q }, 300000);
     const nm = hint.name.trim().toLowerCase();
-    const it = (r.items || []).find(x => x.id !== id && (x.name || '').trim().toLowerCase() === nm);
+    const its = (r.items || []).filter(x => x.id !== id);
+    const it = its.find(x => (x.name || '').trim().toLowerCase() === nm) || its.find(x => (x.name || '').toLowerCase().includes(nm));
     return it ? cachedCall({ type: 'musicBrowse', browseId: it.id }) : null;
 }
 async function miOpen(kind, id, hint) {
-    if (!id) return;
+    if (!id && !hint?.name) return;
     gv('search', document.querySelector('[data-v="search"]'));
     if (document.getElementById('np')?.classList.contains('on')) closeNP();
     const area = document.getElementById('s-res');
@@ -1501,9 +1501,10 @@ async function miOpen(kind, id, hint) {
     _sRender = null; _miMode(true);
     area.innerHTML = _spin;
     try {
-        let d;
-        try { d = await cachedCall({ type: 'musicBrowse', browseId: id }); }
-        catch (e) { d = await _miFallback(kind, id, hint).catch(() => null); if (!d) throw e; }
+        let d = null, err = null;
+        if (_miOk(id)) { try { d = await cachedCall({ type: 'musicBrowse', browseId: id }); } catch (e) { err = e; } }
+        if (!d) d = await _miFallback(kind, id, hint).catch(() => null);
+        if (!d) throw err || new Error('정보를 찾을 수 없어요');
         _sRender = () => _renderMiPage(kind, d);
         _sRender();
     } catch (e) {
@@ -1558,7 +1559,7 @@ function _renderMiPage(kind, d) {
         const songs = sec.items.filter(x => x.kind === 'song'), ents = sec.items.filter(x => x.kind !== 'song');
         if (songs.length) {
             songs.forEach(t => {   // 상세 페이지의 곡에 앨범/아티스트 정보를 채워 넣는다
-                if (isAl) { t.art = t.art || d.thumb; t.album = t.album || d.name; t.albumId = t.albumId || d.id; t.year = t.year || d.year; }
+                if (isAl) { t.art = t.art || d.thumb; t.album = t.album || d.name; t.albumId = t.albumId || d.browseId; t.year = t.year || d.year; }
                 t.channel = t.channel || (isAl ? d.artist : d.name);
                 t.artistId = t.artistId || (isAl ? d.artistId : '');
             });
@@ -1579,13 +1580,14 @@ function miSetNpMeta(t) {
     const ch = document.getElementById('np-ch'), al = document.getElementById('np-album');
     if (ch) { ch.classList.toggle('mi-lnk', !!t.artistId); ch.onclick = t.artistId ? () => miOpen('artist', t.artistId, { name: t.channel }) : null; }
     if (al) {
-        const on = !!(t.album && t.albumId);
+        const on = !!t.album;
         al.textContent = on ? t.album + (t.year ? ' · ' + t.year : '') : '';
-        al.onclick = on ? () => miOpen('album', t.albumId, { name: t.album, artist: t.channel }) : null;
+        al.onclick = on ? () => miOpen('album', _miOk(t.albumId) ? t.albumId : '', { name: t.album, artist: t.channel }) : null;
         al.style.display = on ? '' : 'none';
     }
 }
 async function miTrackContext(t) {
+    if (t?.albumId && !_miOk(t.albumId)) t.albumId = '';   // 저장된 곡에 섞여 있던 잘못된 앨범 ID 정리
     miSetNpMeta(t);
     if (!t?.id) return;
     let items;
@@ -1614,8 +1616,7 @@ async function loadRec(kw, rowId, useVideo) {
     row.innerHTML = `<div class="state" style="padding:28px 20px"><div class="spinner"></div></div>`;
     try {
         let tracks;
-        if (useVideo) { const res = await cachedCall({ type: 'search', query: kw }); tracks = rankMusicResults(res.tracks || []); }
-        else tracks = await songSearch(kw);
+        tracks = await songSearch(kw);
         if (!tracks.length) { row.innerHTML = `<div class="state" style="padding:28px"><p>결과 없음</p></div>`; return; }
         _trackRow(row, tracks.slice(0, 10));
     } catch { row.innerHTML = `<div class="state" style="padding:28px"><p>로드 실패</p></div>`; }
@@ -1974,7 +1975,7 @@ async function loadTopPicks(rowId) {
     try {
         const mixes = buildHeroMixes();
         const seed = tasteSeeds(1)[0];
-        const vs = mix => cachedCall({ type: 'search', query: mix.q }).then(res => rankMusicResults(res.tracks || []));
+        const vs = mix => songSearch(mix.q);
         const results = await Promise.all(mixes.map((mix, i) =>
             (i === 0 && seed
                 ? radioFor(seed.id).then(l => _mix([l], new Set([seed.id]), 2, 10)).then(l => l.length > 3 ? l : vs(mix))
@@ -2017,7 +2018,7 @@ async function _loadChartLegacy(rowId) {
     row.innerHTML = `<div class="state" style="padding:28px 20px"><div class="spinner"></div></div>`;
     try {
         const results = await Promise.all(AM_CHART_QUERIES.map(q =>
-            cachedCall({ type: 'search', query: q }).then(res => rankMusicResults(res.tracks || [])).catch(() => [])
+            songSearch(q).catch(() => [])
         ));
         const chart = [];
         const seen = new Set();
@@ -2330,10 +2331,13 @@ function initSeekBar(barId, fillId) {
     const fill = document.getElementById(fillId);
     if (!bar || !fill) return;
     const thumb = bar.querySelector('.pbd, .np-pd');
-    let dragging = false, animPct = 0, targetPct = 0, rafId = null;
+    let dragging = false, animPct = 0, targetPct = 0, rafId = null, _lw = '';
     function setPos(pct) {
-        fill.style.width = pct.toFixed(3) + '%';
-        if (thumb) thumb.style.left = pct.toFixed(3) + '%';
+        const w = pct.toFixed(2) + '%';
+        if (w === _lw) return;   // 값이 같으면 레이아웃을 다시 계산하지 않는다
+        _lw = w;
+        fill.style.width = w;
+        if (thumb) thumb.style.left = w;
     }
     function animStep() {
         const diff = targetPct - animPct;
@@ -2349,7 +2353,8 @@ function initSeekBar(barId, fillId) {
     }
     bar._setFill = (pct, instant) => {
         targetPct = pct;
-        if (instant) { animPct = pct; setPos(pct); if (rafId) { cancelAnimationFrame(rafId); rafId = null; } return; }
+        /* 250ms 틱의 작은 진행(<1.2%)은 보간 없이 바로 반영 — 재생 내내 rAF 가 도는 것을 막는다. 큰 점프(시크)만 부드럽게. */
+        if (instant || Math.abs(pct - animPct) < 1.2) { animPct = pct; setPos(pct); if (rafId) { cancelAnimationFrame(rafId); rafId = null; } return; }
         if (!rafId) rafId = requestAnimationFrame(animStep);
     };
     function getP(e) {
@@ -3281,8 +3286,7 @@ async function plAddModalSearch(q, immediate = false) {
         const res = document.getElementById('pl-add-modal-results');
         res.innerHTML = `<div class="pl-add-modal-hint"><div class="spinner" style="width:20px;height:20px;border-width:1.5px;margin:0 auto 8px"></div>검색 중...</div>`;
         try {
-            const data = await callCs({ type: 'search', query: q });
-            const tracks = sortMusicFirst(data.tracks || []).slice(0, 5); // 음악 우선 정렬 후, 한번에 나타나는 개수를 줄여 스캔하기 편하게
+            const tracks = (await songSearch(q)).slice(0, 5); // 음악 우선 정렬 후, 한번에 나타나는 개수를 줄여 스캔하기 편하게
             if (!tracks.length) { res.innerHTML = `<div class="pl-add-modal-hint">결과가 없어요</div>`; return; }
             res.innerHTML = '';
             const pl = plById(PL.curId);
