@@ -24,7 +24,9 @@ import okhttp3.Response;
  * 카탈로그 요청은 YTM 요청과 동시에 진행되고(2.5초 제한) 실패해도 검색은 YTM 결과만으로 정상 동작한다.
  */
 final class CatalogSearch {
-    static final class Hit { String title = "", artist = "", album = ""; int dur; }
+    static final class Hit { String title = "", artist = "", album = "", art = "", year = ""; int dur; }
+
+    static <T> Future<T> submit(Callable<T> c) { return POOL.submit(c); }
 
     private static final ExecutorService POOL = Executors.newCachedThreadPool();
     private static volatile OkHttpClient fast;
@@ -76,6 +78,8 @@ final class CatalogSearch {
                 Hit h = new Hit();
                 h.title = o.optString("trackName"); h.artist = o.optString("artistName");
                 h.album = o.optString("collectionName"); h.dur = o.optInt("trackTimeMillis") / 1000;
+                h.art = o.optString("artworkUrl100").replace("100x100bb", "400x400bb");
+                String rd = o.optString("releaseDate"); h.year = rd.length() >= 4 ? rd.substring(0, 4) : "";
                 if (!h.title.isEmpty()) l.add(h);
             }
         } catch (Exception ignored) {}
@@ -95,6 +99,7 @@ final class CatalogSearch {
                 JSONObject ar = o.optJSONObject("artist"), al = o.optJSONObject("album");
                 h.artist = ar == null ? "" : ar.optString("name");
                 h.album = al == null ? "" : al.optString("title");
+                h.art = al == null ? "" : al.optString("cover_big");
                 h.dur = o.optInt("duration");
                 if (!h.title.isEmpty()) l.add(h);
             }
@@ -150,6 +155,39 @@ final class CatalogSearch {
             if (o != null && matches(o.optString("title"), o.optString("channel"), h)) return true;
         }
         return false;
+    }
+
+    /** 카탈로그 곡 → YouTube 영상 검색 결과 중 같은 곡(제목·아티스트·길이)인 영상을 골라 곡 객체로 만든다 */
+    static JSONObject pick(JSONArray vids, Hit h) {
+        JSONObject best = null; double bs = 0;
+        String ht = norm(h.title), ha = norm(h.artist);
+        for (int i = 0; i < vids.length(); i++) {
+            JSONObject v = vids.optJSONObject(i);
+            if (v == null) continue;
+            String vt = norm(v.optString("title")), ch = v.optString("channel");
+            String cl = ch.toLowerCase(Locale.ROOT), tl = v.optString("title").toLowerCase(Locale.ROOT);
+            double sc = 0;
+            if (sameTitle(vt, ht)) sc += 2;
+            if (cl.endsWith("topic") || cl.contains("- topic")) sc += 3;
+            else if (!ha.isEmpty() && (norm(ch).contains(ha) || ha.contains(norm(ch)))) sc += 2;
+            if (!ha.isEmpty() && vt.contains(ha)) sc += 1;
+            int d = v.optInt("dur");
+            if (d > 0 && h.dur > 0) { int df = Math.abs(d - h.dur); sc += df <= 4 ? 3 : df <= 10 ? 1.5 : df > 30 ? -3 : 0; }
+            if (tl.matches(".*(cover|커버|remix|리믹스|live|라이브|karaoke|노래방|instrumental|sped|slowed|nightcore|reverb|8d).*")
+                    && !h.title.toLowerCase(Locale.ROOT).matches(".*(cover|remix|live|karaoke|instrumental).*")) sc -= 4;
+            if (sc > bs) { bs = sc; best = v; }
+        }
+        if (best == null || bs < 4) return null;
+        try {
+            JSONObject t = new JSONObject();
+            String id = best.optString("id");
+            t.put("id", id); t.put("title", h.title); t.put("channel", h.artist);
+            t.put("dur", h.dur > 0 ? h.dur : best.optInt("dur"));
+            t.put("thumb", "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg");
+            t.put("art", h.art); t.put("album", h.album); t.put("albumId", ""); t.put("artistId", "");
+            t.put("year", h.year); t.put("kind", "song");
+            return t;
+        } catch (Exception e) { return null; }
     }
 
     /** 앨범에 등록되지 않은 곡 제거(카탈로그 확인 곡은 예외) → 중복 제거 → 카탈로그 일치 곡 우선 정렬 */
