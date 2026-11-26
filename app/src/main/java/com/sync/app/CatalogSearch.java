@@ -118,7 +118,10 @@ final class CatalogSearch {
     private static boolean sameTitle(String a, String b) {
         if (a.isEmpty() || b.isEmpty()) return false;
         if (a.equals(b)) return true;
-        return Math.min(a.length(), b.length()) >= 4 && (a.contains(b) || b.contains(a));
+        String sh = a.length() <= b.length() ? a : b;
+        boolean cjk = false;
+        for (int i = 0; i < sh.length(); i++) if (sh.charAt(i) > 0x2E7F) { cjk = true; break; }
+        return sh.length() >= (cjk ? 2 : 4) && (a.contains(b) || b.contains(a));   // 한글/CJK 는 짧은 제목도 허용
     }
 
     private static boolean sameArtist(String yt, String hit) {
@@ -177,7 +180,7 @@ final class CatalogSearch {
                     && !h.title.toLowerCase(Locale.ROOT).matches(".*(cover|remix|live|karaoke|instrumental).*")) sc -= 4;
             if (sc > bs) { bs = sc; best = v; }
         }
-        if (best == null || bs < 5) return null;
+        if (best == null || bs < 4) return null;
         try {
             JSONObject t = new JSONObject();
             String id = best.optString("id");
