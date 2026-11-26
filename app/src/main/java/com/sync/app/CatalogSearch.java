@@ -166,8 +166,8 @@ final class CatalogSearch {
             if (v == null) continue;
             String vt = norm(v.optString("title")), ch = v.optString("channel");
             String cl = ch.toLowerCase(Locale.ROOT), tl = v.optString("title").toLowerCase(Locale.ROOT);
-            double sc = 0;
-            if (sameTitle(vt, ht)) sc += 2;
+            if (!sameTitle(vt, ht)) continue;   // 제목이 카탈로그 곡과 다르면 후보 제외
+            double sc = 2;
             if (cl.endsWith("topic") || cl.contains("- topic")) sc += 3;
             else if (!ha.isEmpty() && (norm(ch).contains(ha) || ha.contains(norm(ch)))) sc += 2;
             if (!ha.isEmpty() && vt.contains(ha)) sc += 1;
@@ -177,7 +177,7 @@ final class CatalogSearch {
                     && !h.title.toLowerCase(Locale.ROOT).matches(".*(cover|remix|live|karaoke|instrumental).*")) sc -= 4;
             if (sc > bs) { bs = sc; best = v; }
         }
-        if (best == null || bs < 4) return null;
+        if (best == null || bs < 5) return null;
         try {
             JSONObject t = new JSONObject();
             String id = best.optString("id");
@@ -207,7 +207,7 @@ final class CatalogSearch {
             if (o == null) continue;
             int hi = hitIndex(o, hits);
             boolean reg = !o.optString("albumId").isEmpty();
-            if (anyReg && !reg && hi < 0) continue;
+            if (!reg && hi < 0) continue;   // 앨범 등록 정보도 없고 카탈로그에서도 확인되지 않으면 제외
             if (!seen.add(norm(o.optString("title")) + "|" + norm(o.optString("channel")))) continue;
             double s = 1.0 - i * 0.03;
             if (hi >= 0 && hi < 100) s += 2.0 + 1.0 / (1 + hi);
