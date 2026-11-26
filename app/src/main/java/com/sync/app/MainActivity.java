@@ -936,43 +936,48 @@ public class MainActivity extends AppCompatActivity {
                 .addHeader("Accept-Language", "ko-KR,ko;q=0.9,en;q=0.8")
                 .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
                 .build();
-        try (Response resp = http.newCall(req).execute()) {
+        try (Response resp = httpFan.newCall(req).execute()) {
             if (!resp.isSuccessful() || resp.body() == null) throw new IOException("HTTP " + resp.code());
             return parseSearchResults(readUtf8(resp));
         }
     }
 
-    /** 카탈로그 곡 → 해당 앨범의 YTM 페이지에서 같은 제목 곡을 찾는다(앨범 ID·공식 음원 포함). 실패 시 영상 검색으로 보조 */
-    private JSONObject resolveHit(CatalogSearch.Hit h) {
-        try {
-            if (!h.album.isEmpty()) {
-                JSONArray al = ytmSearchItems(h.album + " " + h.artist, "album", 3);
-                String an = CatalogSearch.norm(h.album);
-                for (int i = 0; i < al.length(); i++) {
-                    JSONObject a = al.getJSONObject(i);
-                    String nn = CatalogSearch.norm(a.optString("name"));
-                    if (nn.isEmpty() || !(nn.equals(an) || nn.contains(an) || an.contains(nn))) continue;
-                    JSONObject body = new JSONObject();
-                    body.put("browseId", a.optString("id"));
-                    JSONObject doc = new JSONObject(ytmCall("browse", body));
-                    for (Object o : ytmFind(doc, "musicResponsiveListItemRenderer")) {
-                        if (!(o instanceof JSONObject)) continue;
-                        JSONObject it = ytmList((JSONObject) o);
-                        if (it == null || !"song".equals(it.optString("kind"))) continue;
-                        if (!CatalogSearch.titleMatches(it.optString("title"), h)) continue;
-                        if (it.optString("channel").isEmpty()) it.put("channel", h.artist);
-                        it.put("album", a.optString("name"));
-                        it.put("albumId", a.optString("id"));
-                        if (it.optString("art").isEmpty()) it.put("art", !h.art.isEmpty() ? h.art : a.optString("thumb"));
-                        if (it.optString("year").isEmpty()) it.put("year", h.year);
-                        if (it.optInt("dur") == 0) it.put("dur", h.dur);
-                        return it;
-                    }
-                    break;
-                }
-            }
-            return CatalogSearch.pick(ytVideoSearch(h.artist + " " + h.title), h);
-        } catch (Exception e) { return null; }
+    private final OkHttpClient httpFan = http.newBuilder().dispatcher(fanDispatcher()).build();
+    private static okhttp3.Dispatcher fanDispatcher() {
+        okhttp3.Dispatcher d = new okhttp3.Dispatcher();
+        d.setMaxRequests(32); d.setMaxRequestsPerHost(16);
+        return d;
+    }
+    private final java.util.concurrent.ConcurrentHashMap<String, JSONObject> songCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 곡 검색: 무료 음원 카탈로그(iTunes + Deezer)의 정식 발매곡을 기준으로, 각 곡의 YouTube 공식 음원(Topic/공식 채널)을 연결한다. */
+    private JSONArray catalogSongs(String query) throws Exception {
+        java.util.List<CatalogSearch.Hit> hits = CatalogSearch.start(http, query).get(3500, java.util.concurrent.TimeUnit.MILLISECONDS);
+        int nCat = hits.size();
+        java.util.ArrayList<java.util.concurrent.Future<JSONObject>> fs = new java.util.ArrayList<>();
+        int n = 0;
+        for (final CatalogSearch.Hit h : hits) {
+            if (n++ >= 14) break;
+            final String key = CatalogSearch.norm(h.title) + "|" + CatalogSearch.norm(h.artist);
+            fs.add(CatalogSearch.submit(() -> {
+                JSONObject c = songCache.get(key);
+                if (c != null) return c;
+                JSONObject t = CatalogSearch.pick(ytVideoSearch(h.artist + " " + h.title), h);
+                if (t != null) songCache.put(key, t);
+                return t;
+            }));
+        }
+        JSONArray out = new JSONArray();
+        java.util.HashSet<String> ids = new java.util.HashSet<>();
+        long dl = System.currentTimeMillis() + 5000;
+        for (java.util.concurrent.Future<JSONObject> f : fs) {
+            try {
+                JSONObject t = f.get(Math.max(200, dl - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (t != null && ids.add(t.optString("id"))) out.put(t);
+            } catch (Exception ignored) {}
+        }
+        if (out.length() == 0) throw new IOException("카탈로그 " + nCat + "곡 / 영상 연결 0곡");
+        return out;
     }
 
     private void doMusicSearch(JSONObject msg) {
@@ -980,43 +985,15 @@ public class MainActivity extends AppCompatActivity {
         try {
             String kind = msg.optString("kind", "song");
             String query = msg.optString("query");
-            // 곡 검색: 무료 카탈로그(iTunes/Deezer) 조회를 YTM 요청과 동시에 시작
-            java.util.concurrent.Future<java.util.List<CatalogSearch.Hit>> cat =
-                    kind.equals("song") ? CatalogSearch.start(http, query) : null;
             JSONArray out;
-            if (cat == null) out = ytmSearchItems(query, kind, 20);
+            if (!kind.equals("song")) out = ytmSearchItems(query, kind, 20);
             else {
-                JSONArray ytm = new JSONArray();
-                try { ytm = ytmSearchItems(query, kind, 30); } catch (Exception ignored) {}
-                java.util.List<CatalogSearch.Hit> hits;
-                try { hits = cat.get(3000, java.util.concurrent.TimeUnit.MILLISECONDS); }
-                catch (Exception e) { hits = new java.util.ArrayList<>(); }
-                out = CatalogSearch.rank(ytm, hits, 20);
-                // 검색어와 관련 있는데 YTM 곡 검색에 없는 카탈로그 곡(앨범 수록곡 등)을 앨범 페이지에서 찾아 채운다 (병렬)
-                java.util.ArrayList<CatalogSearch.Hit> need = new java.util.ArrayList<>();
-                for (CatalogSearch.Hit h : CatalogSearch.relevant(hits, query, 12)) {
-                    if (need.size() >= 5) break;
-                    if (!CatalogSearch.hasMatch(out, h)) need.add(h);
+                try { out = catalogSongs(query); }
+                catch (Exception e) {
+                    // 카탈로그 경로 실패 시 YouTube Music 곡 검색으로 대체
+                    out = CatalogSearch.rank(ytmSearchItems(query, "song", 30), new java.util.ArrayList<CatalogSearch.Hit>(), 20);
+                    if (out.length() == 0) throw e;
                 }
-                java.util.ArrayList<java.util.concurrent.Future<JSONObject>> fs = new java.util.ArrayList<>();
-                for (final CatalogSearch.Hit h : need) fs.add(CatalogSearch.submit(() -> resolveHit(h)));
-                java.util.HashSet<String> ids = new java.util.HashSet<>();
-                for (int i = 0; i < out.length(); i++) ids.add(out.getJSONObject(i).optString("id"));
-                java.util.ArrayList<JSONObject> front = new java.util.ArrayList<>(), back = new java.util.ArrayList<>();
-                long dl = System.currentTimeMillis() + 4500;
-                for (int i = 0; i < fs.size(); i++) {
-                    try {
-                        JSONObject t = fs.get(i).get(Math.max(200, dl - System.currentTimeMillis()), java.util.concurrent.TimeUnit.MILLISECONDS);
-                        if (t == null || !ids.add(t.optString("id"))) continue;
-                        back.add(t);
-                    } catch (Exception ignored) {}
-                }
-                JSONArray merged = new JSONArray();
-                for (JSONObject t : front) merged.put(t);          // 검색어와 제목이 정확히 같은 곡은 맨 위
-                for (int i = 0; i < out.length(); i++) merged.put(out.get(i));
-                for (JSONObject t : back) merged.put(t);
-                out = new JSONArray();
-                for (int i = 0; i < merged.length() && i < 25; i++) out.put(merged.get(i));
             }
             JSONObject res = new JSONObject();
             res.put("items", out);
