@@ -974,13 +974,6 @@ public class MainActivity extends AppCompatActivity {
                         } catch (Exception ignored) {}
                     }
                 }
-                // 최후의 보루: 아무것도 못 찾았으면 일반 영상 검색 결과라도 보여준다
-                if (out.length() == 0) {
-                    try {
-                        JSONArray v = ytVideoSearch(query);
-                        for (int i = 0; i < v.length() && out.length() < 15; i++) out.put(v.getJSONObject(i));
-                    } catch (Exception ignored) {}
-                }
             }
             JSONObject res = new JSONObject();
             res.put("items", out);
