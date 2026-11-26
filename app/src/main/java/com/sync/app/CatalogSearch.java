@@ -190,38 +190,45 @@ final class CatalogSearch {
         } catch (Exception e) { return null; }
     }
 
-    /** 앨범에 등록되지 않은 곡 제거(카탈로그 확인 곡은 예외) → 중복 제거 → 카탈로그 일치 곡 우선 정렬 */
+    static boolean titleMatches(String title, Hit h) { return sameTitle(norm(title), norm(h.title)); }
+
+    /** 검색어와 실제로 관련 있는 카탈로그 곡만(제목 일치·포함 또는 아티스트 일치) */
+    static List<Hit> relevant(List<Hit> hits, String q, int max) {
+        String qn = norm(q);
+        List<Hit> r = new ArrayList<>();
+        if (qn.isEmpty()) return r;
+        for (Hit h : hits) {
+            String tn = norm(h.title), an = norm(h.artist);
+            boolean ok = tn.equals(qn) || (qn.length() >= 2 && tn.contains(qn)) || (tn.length() >= 3 && qn.contains(tn))
+                    || (an.length() >= 2 && (qn.contains(an) || an.contains(qn)));
+            if (ok) { r.add(h); if (r.size() >= max) break; }
+        }
+        return r;
+    }
+
+    /** 검색어가 곡 제목(또는 아티스트+제목)과 정확히 같은가 */
+    static boolean exact(Hit h, String q) {
+        String qn = norm(q), tn = norm(h.title), an = norm(h.artist);
+        return !qn.isEmpty() && (tn.equals(qn) || (an + tn).equals(qn) || (tn + an).equals(qn));
+    }
+
+    /** YTM 곡 결과: 순서는 YouTube Music 관련도 그대로 유지, 중복만 제거.
+     *  앨범 정보가 있는 곡이 하나라도 있으면 앨범 정보 없는 항목(일반 영상)은 제외 */
     static JSONArray rank(JSONArray ytm, List<Hit> hits, int max) {
-        final int n = ytm.length();
-        final double[] sc = new double[n];
-        List<JSONObject> keep = new ArrayList<>();
-        HashSet<String> seen = new HashSet<>();
-        // 앨범 정보가 있는 곡이 하나라도 있을 때만 미등록 항목을 걸러낸다(파싱 실패로 결과가 전부 사라지는 것 방지)
         boolean anyReg = false;
-        for (int i = 0; i < n && !anyReg; i++) {
+        for (int i = 0; i < ytm.length() && !anyReg; i++) {
             JSONObject o = ytm.optJSONObject(i);
             if (o != null && !o.optString("albumId").isEmpty()) anyReg = true;
         }
-        for (int i = 0; i < n; i++) {
+        JSONArray out = new JSONArray();
+        HashSet<String> seen = new HashSet<>();
+        for (int i = 0; i < ytm.length() && out.length() < max; i++) {
             JSONObject o = ytm.optJSONObject(i);
             if (o == null) continue;
-            int hi = hitIndex(o, hits);
-            boolean reg = !o.optString("albumId").isEmpty();
-            if (!reg && hi < 0) continue;   // 앨범 등록 정보도 없고 카탈로그에서도 확인되지 않으면 제외
+            if (anyReg && o.optString("albumId").isEmpty()) continue;
             if (!seen.add(norm(o.optString("title")) + "|" + norm(o.optString("channel")))) continue;
-            double s = 1.0 - i * 0.03;
-            if (hi >= 0 && hi < 100) s += 2.0 + 1.0 / (1 + hi);
-            else if (hi >= 100) s += 0.6;
-            sc[keep.size()] = s;
-            keep.add(o);
+            out.put(o);
         }
-        Integer[] idx = new Integer[keep.size()];
-        for (int i = 0; i < idx.length; i++) idx[i] = i;
-        java.util.Arrays.sort(idx, new java.util.Comparator<Integer>() {
-            @Override public int compare(Integer x, Integer y) { return Double.compare(sc[y], sc[x]); }
-        });
-        JSONArray out = new JSONArray();
-        for (int i = 0; i < idx.length && out.length() < max; i++) out.put(keep.get(idx[i]));
         return out;
     }
 }
