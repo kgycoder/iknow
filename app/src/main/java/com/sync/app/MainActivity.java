@@ -888,26 +888,60 @@ public class MainActivity extends AppCompatActivity {
         } catch (JSONException ignored) {}
     }
 
+    /** YTM 검색 결과를 종류(kind)별로 파싱 */
+    private JSONArray ytmSearchItems(String query, String kind, int max) throws Exception {
+        String p = kind.equals("artist") ? "EgWKAQIgAWoMEA4QChADEAQQCRAF"
+                 : kind.equals("album")  ? "EgWKAQIYAWoMEA4QChADEAQQCRAF"
+                                         : "EgWKAQIIAWoMEA4QChADEAQQCRAF";
+        JSONObject body = new JSONObject();
+        body.put("query", query);
+        body.put("params", p);
+        JSONObject doc = new JSONObject(ytmCall("search", body));
+        JSONArray out = new JSONArray();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        for (Object o : ytmFind(doc, "musicResponsiveListItemRenderer")) {
+            if (!(o instanceof JSONObject)) continue;
+            JSONObject it = ytmList((JSONObject) o);
+            if (it == null || !it.optString("kind").equals(kind)) continue;
+            if (!seen.add(it.optString("id"))) continue;
+            out.put(it);
+            if (out.length() >= max) break;
+        }
+        return out;
+    }
+
     private void doMusicSearch(JSONObject msg) {
         String id = msg.optString("id", "0");
         try {
             String kind = msg.optString("kind", "song");
-            String p = kind.equals("artist") ? "EgWKAQIgAWoMEA4QChADEAQQCRAF"
-                     : kind.equals("album")  ? "EgWKAQIYAWoMEA4QChADEAQQCRAF"
-                                             : "EgWKAQIIAWoMEA4QChADEAQQCRAF";
-            JSONObject body = new JSONObject();
-            body.put("query", msg.optString("query"));
-            body.put("params", p);
-            JSONObject doc = new JSONObject(ytmCall("search", body));
-            JSONArray out = new JSONArray();
-            java.util.HashSet<String> seen = new java.util.HashSet<>();
-            for (Object o : ytmFind(doc, "musicResponsiveListItemRenderer")) {
-                if (!(o instanceof JSONObject)) continue;
-                JSONObject it = ytmList((JSONObject) o);
-                if (it == null || !it.optString("kind").equals(kind)) continue;
-                if (!seen.add(it.optString("id"))) continue;
-                out.put(it);
-                if (out.length() >= 20) break;
+            String query = msg.optString("query");
+            // 곡 검색: 무료 카탈로그(iTunes/Deezer) 조회를 YTM 요청과 동시에 시작
+            java.util.concurrent.Future<java.util.List<CatalogSearch.Hit>> cat =
+                    kind.equals("song") ? CatalogSearch.start(http, query) : null;
+            JSONArray out = ytmSearchItems(query, kind, kind.equals("song") ? 30 : 20);
+            if (cat != null) {
+                java.util.List<CatalogSearch.Hit> hits;
+                try { hits = cat.get(2500, java.util.concurrent.TimeUnit.MILLISECONDS); }
+                catch (Exception e) { hits = new java.util.ArrayList<>(); }
+                JSONArray ranked = CatalogSearch.rank(out, hits, 20);
+                // 카탈로그 1순위 곡이 YTM 결과에 없으면 해당 곡을 직접 찾아 맨 앞에 추가
+                if (!hits.isEmpty() && !CatalogSearch.hasMatch(ranked, hits.get(0))) {
+                    CatalogSearch.Hit h = hits.get(0);
+                    try {
+                        JSONArray r = ytmSearchItems(h.title + " " + h.artist, "song", 6);
+                        for (int i = 0; i < r.length(); i++) {
+                            JSONObject c = r.getJSONObject(i);
+                            if (c.optString("albumId").isEmpty()
+                                    || !CatalogSearch.matches(c.optString("title"), c.optString("channel"), h)) continue;
+                            JSONArray m = new JSONArray(); m.put(c);
+                            for (int k = 0; k < ranked.length() && m.length() < 20; k++)
+                                if (!ranked.getJSONObject(k).optString("id").equals(c.optString("id"))) m.put(ranked.get(k));
+                            ranked = m;
+                            break;
+                        }
+                    } catch (Exception ignored) {}
+                }
+                out = ranked;
             }
             JSONObject res = new JSONObject();
             res.put("items", out);
@@ -925,6 +959,7 @@ public class MainActivity extends AppCompatActivity {
                 body.put("formData", new JSONObject().put("selectedValues", new JSONArray().put(country)));
             JSONObject doc = new JSONObject(ytmCall("browse", body));
             JSONObject res = new JSONObject();
+            res.put("browseId", msg.optString("browseId"));   // JS 가 앨범/아티스트 ID 로 사용 (res.id 는 요청 번호)
             String name = "", thumb = "", desc = "";
             JSONObject hm = new JSONObject();
             String[] hk = {"musicImmersiveHeaderRenderer", "musicVisualHeaderRenderer",
